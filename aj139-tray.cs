@@ -259,6 +259,20 @@ sealed class Painter : IDisposable {
     return p;
   }
 
+  // green (full) -> yellow (half) -> red (20% and below); darker shades so they stay readable on a light taskbar
+  public static Color LevelColor(int lvl, bool light) {
+    Color full = light ? Color.FromArgb(15, 123, 15) : Color.FromArgb(108, 203, 95);
+    Color half = light ? Color.FromArgb(157, 93, 0) : Color.FromArgb(252, 225, 0);
+    Color low  = light ? Color.FromArgb(196, 43, 28) : Color.FromArgb(255, 99, 71);
+    if (lvl >= 50) return Lerp(half, full, (Math.Min(lvl, 100) - 50) / 50f);
+    if (lvl > 20) return Lerp(low, half, (lvl - 20) / 30f);
+    return low;
+  }
+
+  static Color Lerp(Color a, Color b, float t) {
+    return Color.FromArgb((int)Math.Round(a.R + (b.R - a.R) * t), (int)Math.Round(a.G + (b.G - a.G) * t), (int)Math.Round(a.B + (b.B - a.B) * t));
+  }
+
   public static Bitmap PercentIcon(int size, State st, Theme th) {
     Bitmap bmp = new Bitmap(size, size);
     using (Graphics g = Graphics.FromImage(bmp))
@@ -266,7 +280,7 @@ sealed class Painter : IDisposable {
     using (GraphicsPath refPath = TextPath(fam, "88"))
     using (GraphicsPath p = TextPath(fam, st.Level < 0 ? "--" : st.Level.ToString())) {
       g.SmoothingMode = SmoothingMode.AntiAlias; g.PixelOffsetMode = PixelOffsetMode.Half;
-      Color c = (st.Level < 0 || st.Stale) ? Color.FromArgb(130, th.Fg) : st.Level <= 20 ? th.Low : th.Fg;
+      Color c = (st.Level < 0 || st.Stale) ? Color.FromArgb(130, th.Fg) : LevelColor(st.Level, th.Light);
       // scale from "88" so every number gets the same digit height; only "100" shrinks to fit the width
       RectangleF rf = refPath.GetBounds(), r = p.GetBounds();
       float k = Math.Min(size / rf.Height, size / r.Width);
@@ -564,6 +578,10 @@ static class Program {
     byte[] pkt = Array.ConvertAll("00 AA 0E A5 A1 2F 00 00 00 00 00 04 06 02 90 01 84 03 B0 04 40 06 60 09 80 0C 00 00 00 00".Split(' '), x => Convert.ToByte(x, 16));
     int[] st; int act;
     ok &= AjBattery.ParseDpi(pkt, pkt.Length, out st, out act) && act == 1 && string.Join(",", st) == "400,900,1200,1600,2400,3200";
+    // icon colour gradient: ends hit the stops, the middle is in between, below 20 stays red
+    ok &= Painter.LevelColor(100, false) == Color.FromArgb(108, 203, 95) && Painter.LevelColor(50, false) == Color.FromArgb(252, 225, 0);
+    ok &= Painter.LevelColor(20, false) == Color.FromArgb(255, 99, 71) && Painter.LevelColor(5, true) == Color.FromArgb(196, 43, 28);
+    Color mid = Painter.LevelColor(75, false); ok &= mid.R > 108 && mid.R < 252;
     // second real reply (19:13): byte 4 differs (90 instead of A1) and must still parse
     byte[] pkt2 = Array.ConvertAll("00 AA 0E A5 90 2F 00 00 00 00 00 04 06 02 90 01 84 03 B0 04 40 06 60 09 80 0C 00 00 00 00".Split(' '), x => Convert.ToByte(x, 16));
     ok &= AjBattery.ParseDpi(pkt2, pkt2.Length, out st, out act) && act == 1 && st.Length == 6;
@@ -574,7 +592,7 @@ static class Program {
 
   static void Preview(string dir, float scale) {
     Directory.CreateDirectory(dir);
-    int[] levels = { 100, 60, 30, 15, -1 };
+    int[] levels = { 100, 75, 50, 35, 15, -1 };
     foreach (bool light in new[] { false, true }) {
       Theme th = Theme.Make(light, light ? Color.FromArgb(0, 95, 184) : Color.FromArgb(76, 194, 255));
       string name = light ? "light" : "dark";

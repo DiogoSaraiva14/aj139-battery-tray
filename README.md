@@ -8,7 +8,7 @@ The mouse's own software has no tray mode and no battery percentage, and its USB
   <img src="docs/panel.png" alt="Details panel" width="320">
 </p>
 
-- The tray icon shows the battery %, follows the light/dark taskbar theme, and turns red at 20% or below.
+- The tray icon shows the battery %. Its colour shifts from green to yellow to red as the battery drains, with separate shades for light and dark taskbars.
 - Click it to open a Windows 11-style panel with the battery, last update, an estimate of time left, and the DPI stages (the active one highlighted).
 - It updates live when you press the DPI button on the mouse.
 - **Read-only:** it only listens to what the receiver sends and never writes to the mouse.
