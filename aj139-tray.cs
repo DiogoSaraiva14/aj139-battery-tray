@@ -54,6 +54,7 @@ static class AjBattery {
       if (baseLevel < 0 || smooth > baseLevel + 5) { baseLevel = smooth; baseTime = now; }  // first reading or recharged
       Raw = lvl; Level = smooth; LastReport = now; Status = "OK";
     }
+    Log("battery raw " + lvl + " shown " + Level);
   }
 
   public static void ResetForTest() { lock (lk) { recentCount = 0; recentPos = 0; baseLevel = -1; Level = -1; } }
@@ -74,10 +75,11 @@ static class AjBattery {
   public static DateTime DpiChanged = DateTime.MinValue;   // last DPI button press seen live
   public static string DpiCacheFile;
 
-  // 00 AA 0E A5 A1 .. [12]=stage count [13]=active stage (1-based) [14..]=stages, uint16 little-endian
+  // 00 AA 0E A5 xx .. [12]=stage count [13]=active stage (1-based) [14..]=stages, uint16 little-endian
+  // [4] changes between replies (seen A1, 90), so it is not part of the header
   public static bool ParseDpi(byte[] b, int n, out int[] stages, out int active) {
     stages = null; active = -1;
-    if (n < 16 || b[1] != 0xAA || b[2] != 0x0E || b[3] != 0xA5 || b[4] != 0xA1) return false;
+    if (n < 16 || b[1] != 0xAA || b[2] != 0x0E || b[3] != 0xA5) return false;
     int count = b[12]; active = b[13] - 1;
     if (count < 1 || count > 8 || active < 0 || active >= count || n < 14 + 2 * count) return false;
     stages = new int[count];
@@ -91,11 +93,27 @@ static class AjBattery {
   public static void OnDpi(int[] stages, int active, DateTime when) {
     lock (lk) { DpiStages = stages; DpiActive = active; DpiRead = when; }
     SaveDpiCache();
+    Log("dpi stages " + string.Join(",", stages) + " active " + (active + 1));
   }
 
   public static void OnDpiEvent(int active, DateTime when) {
     lock (lk) { DpiActive = active; DpiChanged = when; }
     SaveDpiCache();
+    Log("dpi button -> stage " + (active + 1));
+  }
+
+  // small rolling log next to the exe, for diagnosing things that happen mid-game
+  public static string LogFile;
+  static readonly object logLock = new object();
+  public static void Log(string msg) {
+    if (LogFile == null) return;
+    try {
+      lock (logLock) {
+        FileInfo fi = new FileInfo(LogFile);
+        if (fi.Exists && fi.Length > 200000) { File.Copy(LogFile, LogFile + ".old", true); File.Delete(LogFile); }
+        File.AppendAllText(LogFile, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss ") + msg + "\r\n");
+      }
+    } catch (Exception) { }
   }
 
   static void SaveDpiCache() {
@@ -131,9 +149,13 @@ static class AjBattery {
     while (true) {
       try {
         string path = FindPath();
-        if (path == null) { ReceiverPresent = false; Status = "Receiver not plugged in"; Thread.Sleep(5000); continue; }
+        if (path == null) {
+          if (ReceiverPresent) Log("receiver not found (unplugged?)");
+          ReceiverPresent = false; Status = "Receiver not plugged in"; Thread.Sleep(5000); continue;
+        }
         SafeFileHandle h = CreateFile(path, 0xC0000000, 3, IntPtr.Zero, 3, 0x40000000 /*overlapped*/, IntPtr.Zero);
-        if (h.IsInvalid) { h.Dispose(); Status = "Can't open the receiver"; Thread.Sleep(5000); continue; }
+        if (h.IsInvalid) { Log("open failed, error " + Marshal.GetLastWin32Error()); h.Dispose(); Status = "Can't open the receiver"; Thread.Sleep(5000); continue; }
+        if (!ReceiverPresent) Log("receiver opened");
         ReceiverPresent = true;
         if (Level < 0) Status = "Waiting for the first report";
         using (FileStream fs = new FileStream(h, FileAccess.Read, 65, true)) {
@@ -147,7 +169,11 @@ static class AjBattery {
             if (ev >= 0) OnDpiEvent(ev, DateTime.Now);
           }
         }
-      } catch (Exception) { ReceiverPresent = false; Status = "Receiver disconnected"; Thread.Sleep(3000); }  // unplugged: retry
+      } catch (Exception ex) {
+        // a read error alone isn't a disconnect: reopen; the next FindPath decides whether the receiver is gone
+        Log("read error: " + ex.GetBaseException().Message);
+        Thread.Sleep(1000);
+      }
     }
   }
 
@@ -164,7 +190,7 @@ sealed class State {
   public static State Now() {
     State s = new State();
     s.Level = AjBattery.Level; s.Last = AjBattery.LastReport; s.Status = AjBattery.Status; s.Drain = AjBattery.DrainPerHour();
-    s.Stale = s.Level >= 0 && (DateTime.Now - s.Last).TotalMinutes > 3;   // no reports: mouse asleep, off or on cable
+    s.Stale = s.Level >= 0 && (DateTime.Now - s.Last).TotalMinutes > 15;  // reports can pause for minutes while gaming
     s.Dpi = AjBattery.DpiStages; s.DpiActive = AjBattery.DpiActive; s.DpiRead = AjBattery.DpiRead; s.DpiChanged = AjBattery.DpiChanged;
     return s;
   }
@@ -292,7 +318,7 @@ sealed class Painter : IDisposable {
       // header: mouse glyph, name, connection
       g.DrawString("", fIcon, fg, pad, Px(18));
       g.DrawString("AJ139 V2 MC", fTitle, fg, pad + Px(24), Px(15));
-      string conn = st.Stale ? "No signal" : st.Level >= 0 ? "2.4G receiver" : st.Status;
+      string conn = st.Stale ? "No recent update" : st.Level >= 0 ? "2.4G receiver" : st.Status;
       g.DrawString(conn, fSmall, sub, new RectangleF(0, Px(17), W - pad, Px(20)), far);
 
       // big percentage + verdict
@@ -313,7 +339,7 @@ sealed class Painter : IDisposable {
 
       // details
       string l1 = st.Level >= 0 ? "Updated " + st.Last.ToString("HH:mm:ss") + Dot + Ago(st.Last) : "The mouse reports about once a minute";
-      string l2 = st.Stale ? "No reports - mouse asleep, off or on the cable"
+      string l2 = st.Stale ? "No battery update for " + (int)(DateTime.Now - st.Last).TotalMinutes + " min - mouse asleep or off?"
                 : st.Drain > 0 ? "About " + Hours(st.Level / st.Drain) + " left" + Dot + "-" + st.Drain.ToString("0.0") + "%/h"
                 : st.Level >= 0 ? "Time left: estimating (after ~30 min of use)" : "";
       g.DrawString(l1, fSmall, sub, pad, Px(122));
@@ -486,7 +512,9 @@ static class Program {
       string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AJ139BatteryTray");
       Directory.CreateDirectory(dir);
       AjBattery.DpiCacheFile = Path.Combine(dir, "dpi.txt");
+      AjBattery.LogFile = Path.Combine(dir, "log.txt");
       AjBattery.LoadDpiCache();
+      AjBattery.Log("started");
       Application.EnableVisualStyles();
       Application.Run(new TrayContext(scale));
     }
@@ -536,6 +564,9 @@ static class Program {
     byte[] pkt = Array.ConvertAll("00 AA 0E A5 A1 2F 00 00 00 00 00 04 06 02 90 01 84 03 B0 04 40 06 60 09 80 0C 00 00 00 00".Split(' '), x => Convert.ToByte(x, 16));
     int[] st; int act;
     ok &= AjBattery.ParseDpi(pkt, pkt.Length, out st, out act) && act == 1 && string.Join(",", st) == "400,900,1200,1600,2400,3200";
+    // second real reply (19:13): byte 4 differs (90 instead of A1) and must still parse
+    byte[] pkt2 = Array.ConvertAll("00 AA 0E A5 90 2F 00 00 00 00 00 04 06 02 90 01 84 03 B0 04 40 06 60 09 80 0C 00 00 00 00".Split(' '), x => Convert.ToByte(x, 16));
+    ok &= AjBattery.ParseDpi(pkt2, pkt2.Length, out st, out act) && act == 1 && st.Length == 6;
     pkt[12] = 9; ok &= !AjBattery.ParseDpi(pkt, pkt.Length, out st, out act);           // bad stage count
     Console.WriteLine(ok ? "self-test OK" : "self-test FAILED");
     return ok ? 0 : 1;

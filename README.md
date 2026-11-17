@@ -22,7 +22,7 @@ The receiver (USB `VID 0xA8A5`, `PID 0x2255`) exposes a vendor-defined HID colle
 |---|---|
 | `AA FA 00 xx 38 …` | Battery report (periodic). Byte 4 = battery % |
 | `AA FA AE xx 0A … ss` | DPI button pressed. Byte 10 = new stage (1-based) |
-| `AA 0E A5 A1 … n a [s1 s2 …]` | DPI settings, sent when the vendor app asks: byte 12 = stage count, byte 13 = active stage, then uint16 LE values |
+| `AA 0E A5 xx … n a [s1 s2 …]` | DPI settings, sent when the vendor app asks: byte 12 = stage count, byte 13 = active stage, then uint16 LE values |
 | `AA 03 …` | Firmware strings (`YJX.co.mouse…`, build dates) |
 
 <sub>Byte offsets include the leading report-ID byte.</sub>
@@ -32,7 +32,9 @@ I worked out the meaning of each byte by watching how the values changed:
 - DPI button: the stage number cycles 5 → 6 → 1 → 2 as you press it.
 - DPI settings: the uint16 values read as 400 / 900 / 1200 / 1600 / 2400 / 3200, which match the vendor app.
 
-The mouse's battery reading jitters by about ±3%, so the app shows the median of the last 5 readings.
+The mouse's battery reading jitters by about ±3%, so the app shows the median of the last 5 readings. Byte 4 of the DPI reply changes between replies (seen `A1` and `90`), so it isn't treated as part of the header.
+
+The app keeps a small log (`%LOCALAPPDATA%\AJ139BatteryTray\log.txt`) of battery readings, DPI changes and read errors.
 
 ## Build and run
 
