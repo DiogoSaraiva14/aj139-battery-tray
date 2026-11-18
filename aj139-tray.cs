@@ -27,9 +27,10 @@ static class AjBattery {
   static readonly object lk = new object();
 
   // FA status messages: [0] report id, [1] 0xAA magic, [2] 0xFA, [3] 0x00 periodic / 0xAE event, [5] sub-type
-  // battery: sub-type 0x38, [4] = %. Event copies read ~3% higher than the periodic ones, so only periodic counts.
+  // battery: sub-type 0x38, [10] = %. [10] agrees across both message types and read 100 after a full charge;
+  // [4] (used before) differs by type and reached 111, so it is some other scale.
   public static int Parse(byte[] b, int n) {
-    if (n >= 6 && b[1] == 0xAA && b[2] == 0xFA && b[3] == 0x00 && b[5] == 0x38 && b[4] <= 100) return b[4];
+    if (n >= 11 && b[1] == 0xAA && b[2] == 0xFA && b[5] == 0x38 && b[10] <= 100) return b[10];
     return -1;
   }
 
@@ -161,6 +162,8 @@ static class AjBattery {
         using (FileStream fs = new FileStream(h, FileAccess.Read, 65, true)) {
           while (true) {
             int n = fs.ReadAsync(b, 0, 65).Result;
+            // raw status bytes 3..11 for the battery study (bytes 9-10 may be battery voltage)
+            if (n >= 12 && b[1] == 0xAA && b[2] == 0xFA) Log("FA " + BitConverter.ToString(b, 3, 9).Replace("-", " "));
             int lvl = Parse(b, n);
             if (lvl >= 0) OnLevel(lvl, DateTime.Now);
             int[] st; int act;
@@ -523,8 +526,8 @@ static class Program {
     bool created;
     using (Mutex mutex = new Mutex(true, @"Local\AJ139BatteryTray", out created)) {
       if (!created) return 0;   // already running
-      string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AJ139BatteryTray");
-      Directory.CreateDirectory(dir);
+      // portable: data lives next to the exe (sandboxed launchers redirect AppData writes, which hid the log before)
+      string dir = Path.GetDirectoryName(Application.ExecutablePath);
       AjBattery.DpiCacheFile = Path.Combine(dir, "dpi.txt");
       AjBattery.LogFile = Path.Combine(dir, "log.txt");
       AjBattery.LoadDpiCache();
@@ -553,11 +556,12 @@ static class Program {
   static int SelfTest() {
     Native.AttachConsole(-1);   // print to the calling console
     bool ok = true;
-    ok &= AjBattery.Parse(B(0, 0xAA, 0xFA, 0, 0x59, 0x38), 6) == 89;
-    ok &= AjBattery.Parse(B(0, 0xAA, 0x08, 0xA5, 0x07, 0x20), 6) == -1;
-    ok &= AjBattery.Parse(B(0, 0xAA, 0xFA, 0, 0xFF, 0x38), 6) == -1;
-    ok &= AjBattery.Parse(B(0, 0xAA, 0xFA), 3) == -1;
-    ok &= AjBattery.Parse(B(0, 0xAA, 0xFA, 0xAE, 0x5C, 0x38), 6) == -1;                 // event copy: ignored
+    // real packets: periodic (yesterday, 81%) and event (today after a full charge, 100%)
+    ok &= AjBattery.Parse(B(0, 0xAA, 0xFA, 0, 0x59, 0x38, 0, 0, 0, 0xD0, 0x51), 11) == 81;
+    ok &= AjBattery.Parse(B(0, 0xAA, 0xFA, 0xAE, 0x6F, 0x38, 1, 1, 1, 0xD0, 0x64), 11) == 100;
+    ok &= AjBattery.Parse(B(0, 0xAA, 0xFA, 0, 0x59, 0x38, 0, 0, 0, 0xD0, 0xFF), 11) == -1;  // out of range
+    ok &= AjBattery.Parse(B(0, 0xAA, 0x08, 0xA5, 0x07, 0x20, 0, 0, 0, 0x20, 0x01), 11) == -1;
+    ok &= AjBattery.Parse(B(0, 0xAA, 0xFA, 0, 0x59, 0x38), 6) == -1;                     // too short
     // real DPI button press (stage 5 of 6) must not read as battery 38%
     byte[] press = B(0, 0xAA, 0xFA, 0xAE, 0x26, 0x0A, 1, 1, 1, 0x10, 5, 4);
     ok &= AjBattery.Parse(press, 12) == -1 && AjBattery.ParseDpiEvent(press, 12) == 4;

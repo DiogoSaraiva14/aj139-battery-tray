@@ -20,7 +20,7 @@ The receiver (USB `VID 0xA8A5`, `PID 0x2255`) exposes a vendor-defined HID colle
 
 | Message | Meaning |
 |---|---|
-| `AA FA 00 xx 38 …` | Battery report (periodic). Byte 4 = battery % |
+| `AA FA tt xx 38 … D0 pp` | Battery report, sent periodically (`tt` = `00`) and on events (`tt` = `AE`). Byte 10 (`pp`) = battery % |
 | `AA FA AE xx 0A … ss` | DPI button pressed. Byte 10 = new stage (1-based) |
 | `AA 0E A5 xx … n a [s1 s2 …]` | DPI settings, sent when the vendor app asks: byte 12 = stage count, byte 13 = active stage, then uint16 LE values |
 | `AA 03 …` | Firmware strings (`YJX.co.mouse…`, build dates) |
@@ -28,13 +28,13 @@ The receiver (USB `VID 0xA8A5`, `PID 0x2255`) exposes a vendor-defined HID colle
 <sub>Byte offsets include the leading report-ID byte.</sub>
 
 I worked out the meaning of each byte by watching how the values changed:
-- Battery: the value drops slowly over time.
+- Battery: byte 10 drops slowly with use, reads the same in both message types, and is exactly 100 after a full charge. Byte 4 looked like a percentage at first, but it differs between the two message types and reached 111, so it measures something else.
 - DPI button: the stage number cycles 5 → 6 → 1 → 2 as you press it.
 - DPI settings: the uint16 values read as 400 / 900 / 1200 / 1600 / 2400 / 3200, which match the vendor app.
 
 The mouse's battery reading jitters by about ±3%, so the app shows the median of the last 5 readings. Byte 4 of the DPI reply changes between replies (seen `A1` and `90`), so it isn't treated as part of the header.
 
-The app keeps a small log (`%LOCALAPPDATA%\AJ139BatteryTray\log.txt`) of battery readings, DPI changes and read errors.
+The app keeps a small log (`log.txt`, next to the exe) of battery readings, the raw status bytes, DPI changes and read errors. It stores the last DPI stages in `dpi.txt` in the same folder, so keep the exe somewhere you can write to.
 
 ## Build and run
 
@@ -51,7 +51,7 @@ AJ139Tray.exe
 | `--watch [sec]` | Prints live readings to the console |
 | `--preview <dir>` | Renders the icon and panel to PNG files |
 
-To start it with Windows, put a shortcut to `AJ139Tray.exe` in `shell:startup`.
+To start it with Windows, put a shortcut to `AJ139Tray.exe` in `shell:startup` (or create a Task Scheduler task with an "At log on" trigger).
 
 `tools/hidprobe.ps1` is the read-only probe I used to find the protocol. It lists a device's vendor HID channels and logs everything they send:
 
