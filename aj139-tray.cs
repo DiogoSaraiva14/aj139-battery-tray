@@ -5,6 +5,7 @@
 //         AJ139Tray.exe --selftest
 //         AJ139Tray.exe --preview <folder>   (PNG renders of icons and panel)
 using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Text;
@@ -23,7 +24,6 @@ static class AjBattery {
   public static volatile int Level = -1;
   public static volatile string Status = "Starting";
   public static DateTime LastReport = DateTime.MinValue;
-  static int baseLevel = -1; static DateTime baseTime;
   static readonly object lk = new object();
 
   // FA status messages: [0] report id, [1] 0xAA magic, [2] 0xFA, [3] 0x00 periodic / 0xAE event, [5] sub-type
@@ -40,32 +40,46 @@ static class AjBattery {
     return -1;
   }
 
-  public static volatile int Raw = -1;                 // latest reading as sent; Level is the smoothed one
+  public static volatile int Raw = -1;                 // latest reading as sent; Level is what we show
   public static volatile bool ReceiverPresent;
-  static readonly int[] recent = new int[5];           // ~5 min of readings; the mouse's value jumps around by a few %
-  static int recentCount, recentPos;
+  // readings since the last charge. A full day of logs showed coarse plateaus (100, 90, ...) with short
+  // load dips of 3-20 points that recover on the next report, so the shown level is the highest of the last
+  // 12 reports (count, not time, so gaps in reporting don't matter) and only goes down, except for a charge:
+  // a jump of +10, or all 12 recent reports above the shown level (a top-up). Drain is fitted over the discharge.
+  static readonly List<KeyValuePair<DateTime, int>> hist = new List<KeyValuePair<DateTime, int>>();
+  const int Window = 12, ChargeJump = 10, MaxHist = 3000;   // 3000 reports ~ 2 days
 
-  public static void OnLevel(int lvl, DateTime now) {
+  public static void OnLevel(int raw, DateTime now) {
     lock (lk) {
-      if (recentCount > 0 && lvl > Level + 5) { recentCount = 0; recentPos = 0; }   // charged: drop old readings
-      recent[recentPos] = lvl; recentPos = (recentPos + 1) % recent.Length;
-      if (recentCount < recent.Length) recentCount++;
-      int[] s = new int[recentCount]; Array.Copy(recent, s, recentCount); Array.Sort(s);
-      int smooth = s[recentCount / 2];                  // median
-      if (baseLevel < 0 || smooth > baseLevel + 5) { baseLevel = smooth; baseTime = now; }  // first reading or recharged
-      Raw = lvl; Level = smooth; LastReport = now; Status = "OK";
+      if (Level >= 0 && raw >= Level + ChargeJump) hist.Clear();   // charged: new discharge starts here
+      hist.Add(new KeyValuePair<DateTime, int>(now, raw));
+      if (hist.Count > MaxHist) hist.RemoveAt(0);
+      int peak = -1, low = 101, k = Math.Min(Window, hist.Count);
+      for (int i = hist.Count - k; i < hist.Count; i++) { peak = Math.Max(peak, hist[i].Value); low = Math.Min(low, hist[i].Value); }
+      if (Level < 0 || hist.Count == 1) Level = raw;
+      else if (k == Window && low > Level) {   // every recent report is higher: topped up
+        Level = low; hist.RemoveRange(0, hist.Count - Window);
+      }
+      else if (peak < Level) Level = peak;     // only goes down between charges
+      Raw = raw; LastReport = now; Status = "OK";
     }
-    Log("battery raw " + lvl + " shown " + Level);
+    Log("battery raw " + raw + " shown " + Level);
   }
 
-  public static void ResetForTest() { lock (lk) { recentCount = 0; recentPos = 0; baseLevel = -1; Level = -1; } }
+  public static void ResetForTest() { lock (lk) { hist.Clear(); Level = -1; } }
 
-  // %/hour since the baseline; -1 until there is enough data (the mouse's reading jitters by +/-1%)
+  // %/hour from a least-squares line over the readings since the last charge; -1 until 2 h of data
+  // (the plateaus make anything shorter meaningless)
   public static double DrainPerHour() {
     lock (lk) {
-      double h = (LastReport - baseTime).TotalHours;
-      if (baseLevel < 0 || h < 0.5 || baseLevel - Level < 2) return -1;
-      return (baseLevel - Level) / h;
+      int n = hist.Count;
+      if (n < 10 || (hist[n - 1].Key - hist[0].Key).TotalHours < 2) return -1;
+      DateTime t0 = hist[0].Key; double sx = 0, sy = 0, sxx = 0, sxy = 0;
+      foreach (KeyValuePair<DateTime, int> p in hist) {
+        double x = (p.Key - t0).TotalHours; sx += x; sy += p.Value; sxx += x * x; sxy += x * p.Value;
+      }
+      double slope = (n * sxy - sx * sy) / (n * sxx - sx * sx);
+      return slope < 0 ? -slope : -1;
     }
   }
 
@@ -317,9 +331,10 @@ sealed class Painter : IDisposable {
     return Math.Round(sec / 3600.0, 1) + " h ago";
   }
 
+  // coarse on purpose: the mouse only reports in steps
   static string Hours(double h) {
-    if (h >= 24) return Math.Floor(h / 24) + " d " + Math.Floor(h % 24) + " h";
-    return Math.Floor(h) + " h " + Math.Floor((h % 1) * 60).ToString("00") + " min";
+    if (h >= 36) return Math.Round(h / 24) + " days";
+    return Math.Round(h) + " h";
   }
 
   const string Dot = "  ·  ";
@@ -339,7 +354,7 @@ sealed class Painter : IDisposable {
       g.DrawString(conn, fSmall, sub, new RectangleF(0, Px(17), W - pad, Px(20)), far);
 
       // big percentage + verdict
-      string pct = st.Level >= 0 ? st.Level + "%" : "--%";
+      string pct = st.Level >= 0 ? "~" + st.Level + "%" : "--%";   // approximate: reported in coarse steps
       g.DrawString(pct, fBig, fg, pad - Px(3), Px(42));
       float pw = g.MeasureString(pct, fBig).Width;
       string verdict = st.Level < 0 ? "" : st.Stale ? "Last known" : st.Level <= 20 ? "Low - charge soon" : st.Level <= 50 ? "OK" : "Good";
@@ -358,7 +373,7 @@ sealed class Painter : IDisposable {
       string l1 = st.Level >= 0 ? "Updated " + st.Last.ToString("HH:mm:ss") + Dot + Ago(st.Last) : "The mouse reports about once a minute";
       string l2 = st.Stale ? "No battery update for " + (int)(DateTime.Now - st.Last).TotalMinutes + " min - mouse asleep or off?"
                 : st.Drain > 0 ? "About " + Hours(st.Level / st.Drain) + " left" + Dot + "-" + st.Drain.ToString("0.0") + "%/h"
-                : st.Level >= 0 ? "Time left: estimating (after ~30 min of use)" : "";
+                : st.Level >= 0 ? "Time left: estimating (needs 2 h since the last charge)" : "";
       g.DrawString(l1, fSmall, sub, pad, Px(122));
       g.DrawString(l2, fSmall, sub, pad, Px(144));
 
@@ -566,18 +581,27 @@ static class Program {
     byte[] press = B(0, 0xAA, 0xFA, 0xAE, 0x26, 0x0A, 1, 1, 1, 0x10, 5, 4);
     ok &= AjBattery.Parse(press, 12) == -1 && AjBattery.ParseDpiEvent(press, 12) == 4;
     ok &= AjBattery.ParseDpiEvent(B(0, 0xAA, 0xFA, 0, 0x59, 0x38, 0, 0, 0, 0xD0, 0x51), 11) == -1;
-    // smoothing: the real 89 / 86 / 89 jitter shows as 89
+    // shown level, modelled on the real log: plateau at 100 with a dip to 80, then 90, then a jitter up to 92
     DateTime t0 = new DateTime(2026, 1, 1, 12, 0, 0);
     AjBattery.ResetForTest();
-    AjBattery.OnLevel(89, t0); AjBattery.OnLevel(86, t0); AjBattery.OnLevel(89, t0);
-    ok &= AjBattery.Level == 89 && AjBattery.Raw == 89;
-    // drain estimate on the smoothed value
+    AjBattery.OnLevel(100, t0);
+    AjBattery.OnLevel(80, t0.AddMinutes(1)); ok &= AjBattery.Level == 100 && AjBattery.Raw == 80;   // load dip ignored
+    for (int m = 2; m <= 20; m++) AjBattery.OnLevel(90, t0.AddMinutes(m));
+    ok &= AjBattery.Level == 90;                                                        // real drop shows once the 100s age out
+    AjBattery.OnLevel(92, t0.AddMinutes(21)); ok &= AjBattery.Level == 90;              // jitter never creeps back up
+    AjBattery.OnLevel(80, t0.AddMinutes(40)); AjBattery.OnLevel(90, t0.AddMinutes(41)); // dip right after a 19-min gap
+    ok &= AjBattery.Level == 90;                                                        // (the 15:46 case from the real log)
+    for (int m = 42; m < 54; m++) AjBattery.OnLevel(96, t0.AddMinutes(m));
+    ok &= AjBattery.Level == 96;                                                        // small top-up shows once sustained
+    // drain: a steady 2 %/h over 3 h, only after 2 h of history
     AjBattery.ResetForTest();
-    AjBattery.OnLevel(90, t0); ok &= AjBattery.DrainPerHour() == -1;                    // no history yet
-    for (int i = 0; i < 3; i++) AjBattery.OnLevel(86, t0.AddHours(2));
-    ok &= AjBattery.Level == 86 && AjBattery.DrainPerHour() == 2;                       // 4% in 2 h
-    AjBattery.OnLevel(100, t0.AddHours(3));
-    ok &= AjBattery.Level == 100 && AjBattery.DrainPerHour() == -1;                     // recharged: shows at once, estimate resets
+    for (int m = 0; m <= 180; m += 10) {
+      AjBattery.OnLevel(90 - m / 30, t0.AddMinutes(m));
+      if (m == 60) ok &= AjBattery.DrainPerHour() == -1;                                // < 2 h: no estimate
+    }
+    double d = AjBattery.DrainPerHour(); ok &= d > 1.7 && d < 2.3;
+    AjBattery.OnLevel(100, t0.AddMinutes(200));                                         // charged (+10): reset
+    ok &= AjBattery.Level == 100 && AjBattery.DrainPerHour() == -1;
     // real DPI reply captured from the AJAZZ app: 6 stages, stage 2 (1-based) active = index 1
     byte[] pkt = Array.ConvertAll("00 AA 0E A5 A1 2F 00 00 00 00 00 04 06 02 90 01 84 03 B0 04 40 06 60 09 80 0C 00 00 00 00".Split(' '), x => Convert.ToByte(x, 16));
     int[] st; int act;

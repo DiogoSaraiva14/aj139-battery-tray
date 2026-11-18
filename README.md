@@ -32,7 +32,21 @@ I worked out the meaning of each byte by watching how the values changed:
 - DPI button: the stage number cycles 5 → 6 → 1 → 2 as you press it.
 - DPI settings: the uint16 values read as 400 / 900 / 1200 / 1600 / 2400 / 3200, which match the vendor app.
 
-The mouse's battery reading jitters by about ±3%, so the app shows the median of the last 5 readings. Byte 4 of the DPI reply changes between replies (seen `A1` and `90`), so it isn't treated as part of the header.
+### Battery: what a day of logging showed
+
+I logged every raw status message for a full working day (290 reports, 100% → 90% over about 5 hours):
+- The mouse reports battery in **coarse steps**: it sat at 100%, slid to 90%, then stayed at 90% for almost 4 hours.
+- It has **short load dips** of 3–20 points (often straight to 80) that recover on the next report. The value went *up* 57 times during a discharge.
+- Average drain was about **1.9% per hour**, roughly **50 hours** per charge, but over less than a couple of hours the plateaus make any rate meaningless.
+- Reports can pause for up to ~16 minutes.
+
+So the app:
+- shows the **highest of the last 12 reports** (by count, so pauses don't matter), which removes the load dips;
+- **only lets it go down** between charges. It goes up straight away on a jump of +10, or when all 12 recent reports are above it (a top-up);
+- estimates time left from a **straight-line fit over all reports since the last charge**, shown only after 2 hours of data and rounded to hours or days;
+- shows the percentage as **approximate** (`~90%`).
+
+Replaying the logged day through this rule gives 100 → 97 → 93 → 90 (3 changes). The previous median-of-5 changed 37 times, 18 of them upward. Byte 4 of the DPI reply changes between replies (seen `A1` and `90`), so it isn't treated as part of the header.
 
 The app keeps a small log (`log.txt`, next to the exe) of battery readings, the raw status bytes, DPI changes and read errors. It stores the last DPI stages in `dpi.txt` in the same folder, so keep the exe somewhere you can write to.
 
