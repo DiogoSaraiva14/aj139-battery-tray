@@ -49,6 +49,13 @@ static class AjBattery {
   static readonly List<KeyValuePair<DateTime, int>> hist = new List<KeyValuePair<DateTime, int>>();
   const int Window = 12, ChargeJump = 10, MaxHist = 3000;   // 3000 reports ~ 2 days
 
+  // The mouse sends the DPI frame (also when it wakes from idle, with nobody pressing the button) and then a
+  // status frame with [10] = 0x50 (80) whatever the real level is: 120 of 120 in the logs, true level 100..34.
+  // It is a placeholder, and the +10 charge rule would take it for a charge, so drop it.
+  public static bool IsWakePlaceholder(int raw, DateTime now, DateTime lastDpiFrame) {
+    return raw == 80 && now >= lastDpiFrame && (now - lastDpiFrame).TotalSeconds <= 2;
+  }
+
   public static void OnLevel(int raw, DateTime now) {
     lock (lk) {
       if (Level >= 0 && raw >= Level + ChargeJump) hist.Clear();   // charged: new discharge starts here
@@ -179,7 +186,11 @@ static class AjBattery {
             // raw status bytes 3..11 for the battery study (bytes 9-10 may be battery voltage)
             if (n >= 12 && b[1] == 0xAA && b[2] == 0xFA) Log("FA " + BitConverter.ToString(b, 3, 9).Replace("-", " "));
             int lvl = Parse(b, n);
-            if (lvl >= 0) OnLevel(lvl, DateTime.Now);
+            if (lvl >= 0) {
+              DateTime now = DateTime.Now;
+              if (IsWakePlaceholder(lvl, now, DpiChanged)) Log("ignored placeholder 80 after DPI frame");
+              else OnLevel(lvl, now);
+            }
             int[] st; int act;
             if (ParseDpi(b, n, out st, out act)) OnDpi(st, act, DateTime.Now);
             int ev = ParseDpiEvent(b, n);
@@ -581,6 +592,10 @@ static class Program {
     byte[] press = B(0, 0xAA, 0xFA, 0xAE, 0x26, 0x0A, 1, 1, 1, 0x10, 5, 4);
     ok &= AjBattery.Parse(press, 12) == -1 && AjBattery.ParseDpiEvent(press, 12) == 4;
     ok &= AjBattery.ParseDpiEvent(B(0, 0xAA, 0xFA, 0, 0x59, 0x38, 0, 0, 0, 0xD0, 0x51), 11) == -1;
+    // wake placeholder: an 80 within 2 s of a DPI frame is dropped; later or other values are real
+    DateTime tw = new DateTime(2026, 1, 1, 9, 0, 0);
+    ok &= AjBattery.IsWakePlaceholder(80, tw.AddSeconds(1), tw) && !AjBattery.IsWakePlaceholder(80, tw.AddSeconds(3), tw);
+    ok &= !AjBattery.IsWakePlaceholder(36, tw.AddSeconds(1), tw) && !AjBattery.IsWakePlaceholder(80, tw, DateTime.MinValue);   // no DPI frame seen yet
     // shown level, modelled on the real log: plateau at 100 with a dip to 80, then 90, then a jitter up to 92
     DateTime t0 = new DateTime(2026, 1, 1, 12, 0, 0);
     AjBattery.ResetForTest();

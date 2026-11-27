@@ -21,7 +21,7 @@ The receiver (USB `VID 0xA8A5`, `PID 0x2255`) exposes a vendor-defined HID colle
 | Message | Meaning |
 |---|---|
 | `AA FA tt xx 38 … D0 pp` | Battery report, sent periodically (`tt` = `00`) and on events (`tt` = `AE`). Byte 10 (`pp`) = battery % |
-| `AA FA AE xx 0A … ss` | DPI button pressed. Byte 10 = new stage (1-based) |
+| `AA FA AE xx 0A … ss` | DPI frame: sent when the DPI button is pressed, and also when the mouse wakes from idle. Byte 10 = current stage (1-based) |
 | `AA 0E A5 xx … n a [s1 s2 …]` | DPI settings, sent when the vendor app asks: byte 12 = stage count, byte 13 = active stage, then uint16 LE values |
 | `AA 03 …` | Firmware strings (`YJX.co.mouse…`, build dates) |
 
@@ -29,6 +29,7 @@ The receiver (USB `VID 0xA8A5`, `PID 0x2255`) exposes a vendor-defined HID colle
 
 I worked out the meaning of each byte by watching how the values changed:
 - Battery: byte 10 drops slowly with use, reads the same in both message types, and is exactly 100 after a full charge. Byte 4 looked like a percentage at first, but it differs between the two message types and reached 111, so it measures something else.
+- Wake-up: the frame above also arrives after the mouse has been idle (no button press), followed by a battery frame whose byte 10 is always `0x50` (80), whatever the real level (120 of 120 in the logs, true level 100% down to 34%). It is a placeholder, so the app drops an 80 that arrives within 2 s of a DPI frame. Without that, the +10 charge rule took it for a charge and showed ~80% for the next 12 reports.
 - DPI button: the stage number cycles 5 → 6 → 1 → 2 as you press it.
 - DPI settings: the uint16 values read as 400 / 900 / 1200 / 1600 / 2400 / 3200, which match the vendor app.
 
