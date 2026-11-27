@@ -9,6 +9,7 @@
 ![.NET Framework](https://img.shields.io/badge/.NET%20Framework-4.x-512BD4)
 ![Size](https://img.shields.io/badge/exe-~26%20KB-brightgreen)
 ![Read-only](https://img.shields.io/badge/mouse-read--only-informational)
+![License](https://img.shields.io/badge/license-MIT-blue)
 
 <img src="docs/panel.png" alt="Details panel" width="320">
 
@@ -118,3 +119,8 @@ Issues and pull requests are welcome. Before sending a change, run `build.cmd` a
 - The protocol was inferred from observation, so the byte meanings are a best reading, not official.
 - Only the 2.4G receiver is supported. Over Bluetooth this mouse doesn't expose the standard battery service.
 - Not affiliated with AJAZZ.
+
+## License
+
+[MIT](LICENSE).
+

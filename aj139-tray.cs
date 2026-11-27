@@ -558,8 +558,14 @@ static class Program {
       AjBattery.LogFile = Path.Combine(dir, "log.txt");
       AjBattery.LoadDpiCache();
       AjBattery.Log("started");
+      // record why the app ends, so a silent exit leaves a trace in log.txt
+      AppDomain.CurrentDomain.UnhandledException += delegate(object s, UnhandledExceptionEventArgs e) { AjBattery.Log("crash: " + e.ExceptionObject); };
+      Application.ThreadException += delegate(object s, ThreadExceptionEventArgs e) { AjBattery.Log("ui error: " + e.Exception); };
+      SystemEvents.SessionEnding += delegate(object s, SessionEndingEventArgs e) { AjBattery.Log("session ending: " + e.Reason); };
+      SystemEvents.PowerModeChanged += delegate(object s, PowerModeChangedEventArgs e) { AjBattery.Log("power: " + e.Mode); };
       Application.EnableVisualStyles();
       Application.Run(new TrayContext(scale));
+      AjBattery.Log("exited normally");
     }
     return 0;
   }
