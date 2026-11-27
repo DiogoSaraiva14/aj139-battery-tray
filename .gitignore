@@ -1,1 +1,5 @@
 *.exe
+log.txt
+log.txt.old
+dpi.txt
+graphify-out/
