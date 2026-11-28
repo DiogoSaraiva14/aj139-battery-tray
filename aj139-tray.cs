@@ -56,24 +56,52 @@ static class AjBattery {
     return raw == 80 && now >= lastDpiFrame && (now - lastDpiFrame).TotalSeconds <= 2;
   }
 
-  public static void OnLevel(int raw, DateTime now) {
-    lock (lk) {
-      if (Level >= 0 && raw >= Level + ChargeJump) hist.Clear();   // charged: new discharge starts here
-      hist.Add(new KeyValuePair<DateTime, int>(now, raw));
-      if (hist.Count > MaxHist) hist.RemoveAt(0);
-      int peak = -1, low = 101, k = Math.Min(Window, hist.Count);
-      for (int i = hist.Count - k; i < hist.Count; i++) { peak = Math.Max(peak, hist[i].Value); low = Math.Min(low, hist[i].Value); }
-      if (Level < 0 || hist.Count == 1) Level = raw;
-      else if (k == Window && low > Level) {   // every recent report is higher: topped up
-        Level = low; hist.RemoveRange(0, hist.Count - Window);
-      }
-      else if (peak < Level) Level = peak;     // only goes down between charges
-      Raw = raw; LastReport = now; Status = "OK";
-    }
-    Log("battery raw " + raw + " shown " + Level);
+  // [11] of a battery frame is 1 while the cable is connected (seen on 28 Nov: 0 -> 1 the moment the dead mouse was
+  // plugged in, and the reports kept coming). Returns -1 for anything that is not a battery frame.
+  public static int ParseCharging(byte[] b, int n) {
+    if (n >= 12 && b[1] == 0xAA && b[2] == 0xFA && b[5] == 0x38 && b[10] <= 100) return b[11] == 1 ? 1 : 0;
+    return -1;
   }
 
-  public static void ResetForTest() { lock (lk) { hist.Clear(); Level = -1; } }
+  public static volatile bool Charging;
+  static int chgRun;                       // consecutive reports with the cable flag set
+  // near empty the dips are real voltage sag, not load noise, and max-of-12 stayed at 7% on a mouse that died
+  // (raw 2-8 for 15 h): below this use the median of the last few reports instead
+  const int LowZone = 15, LowWindow = 5;
+
+  static int Median(int count) {
+    int[] v = new int[count];
+    for (int i = 0; i < count; i++) v[i] = hist[hist.Count - count + i].Value;
+    Array.Sort(v); return v[count / 2];
+  }
+
+  public static void OnLevel(int raw, DateTime now, bool charging = false) {
+    lock (lk) {
+      if (charging) {
+        // while charging the reading is the charger-lifted voltage (0 -> 84 in 26 s, then flat 88-90 for 30 min), not a
+        // state of charge: keep it out of the history and the shown level
+        chgRun++; Charging = true;
+      } else {
+        // unplugged after a real charge (not a one-report cable touch): start a fresh discharge from this reading
+        if (Charging) { Charging = false; if (chgRun >= 3) { hist.Clear(); Level = -1; } chgRun = 0; }
+        if (Level >= 0 && raw >= Level + ChargeJump) hist.Clear();   // charged: new discharge starts here
+        hist.Add(new KeyValuePair<DateTime, int>(now, raw));
+        if (hist.Count > MaxHist) hist.RemoveAt(0);
+        int peak = -1, low = 101, k = Math.Min(Window, hist.Count);
+        for (int i = hist.Count - k; i < hist.Count; i++) { peak = Math.Max(peak, hist[i].Value); low = Math.Min(low, hist[i].Value); }
+        int cand = Level >= 0 && Level <= LowZone ? Median(Math.Min(LowWindow, hist.Count)) : peak;
+        if (Level < 0 || hist.Count == 1) Level = raw;
+        else if (k == Window && low > Level) {   // every recent report is higher: topped up
+          Level = low; hist.RemoveRange(0, hist.Count - Window);
+        }
+        else if (cand < Level) Level = cand;     // only goes down between charges
+      }
+      Raw = raw; LastReport = now; Status = "OK";
+    }
+    Log("battery raw " + raw + " shown " + Level + (charging ? " charging" : ""));
+  }
+
+  public static void ResetForTest() { lock (lk) { hist.Clear(); Level = -1; Charging = false; chgRun = 0; } }
 
   // %/hour from a least-squares line over the readings since the last charge; -1 until 2 h of data
   // (the plateaus make anything shorter meaningless)
@@ -189,7 +217,7 @@ static class AjBattery {
             if (lvl >= 0) {
               DateTime now = DateTime.Now;
               if (IsWakePlaceholder(lvl, now, DpiChanged)) Log("ignored placeholder 80 after DPI frame");
-              else OnLevel(lvl, now);
+              else OnLevel(lvl, now, ParseCharging(b, n) == 1);
             }
             int[] st; int act;
             if (ParseDpi(b, n, out st, out act)) OnDpi(st, act, DateTime.Now);
@@ -212,13 +240,14 @@ static class AjBattery {
 // State snapshot + theme
 // ---------------------------------------------------------------------------------------------
 sealed class State {
-  public int Level; public DateTime Last; public string Status; public double Drain; public bool Stale;
+  public int Level; public DateTime Last; public string Status; public double Drain; public bool Stale, Charging;
   public int[] Dpi; public int DpiActive; public DateTime DpiRead, DpiChanged;
 
   public static State Now() {
     State s = new State();
     s.Level = AjBattery.Level; s.Last = AjBattery.LastReport; s.Status = AjBattery.Status; s.Drain = AjBattery.DrainPerHour();
-    s.Stale = s.Level >= 0 && (DateTime.Now - s.Last).TotalMinutes > 15;  // reports can pause for minutes while gaming
+    s.Charging = AjBattery.Charging;
+    s.Stale = (s.Level >= 0 || s.Charging) && (DateTime.Now - s.Last).TotalMinutes > 15;  // reports can pause for minutes while gaming
     s.Dpi = AjBattery.DpiStages; s.DpiActive = AjBattery.DpiActive; s.DpiRead = AjBattery.DpiRead; s.DpiChanged = AjBattery.DpiChanged;
     return s;
   }
@@ -301,7 +330,22 @@ sealed class Painter : IDisposable {
     return Color.FromArgb((int)Math.Round(a.R + (b.R - a.R) * t), (int)Math.Round(a.G + (b.G - a.G) * t), (int)Math.Round(a.B + (b.B - a.B) * t));
   }
 
+  // charging: the percentage isn't meaningful on the cable, so the icon is a lightning bolt in the accent colour
+  static Bitmap BoltIcon(int size, Theme th) {
+    Bitmap bmp = new Bitmap(size, size);
+    using (Graphics g = Graphics.FromImage(bmp))
+    using (SolidBrush b = new SolidBrush(th.Accent)) {
+      g.SmoothingMode = SmoothingMode.AntiAlias;
+      float[] u = { 0.60f, 0.04f, 0.18f, 0.55f, 0.46f, 0.55f, 0.36f, 0.96f, 0.82f, 0.40f, 0.54f, 0.40f };
+      PointF[] pts = new PointF[6];
+      for (int i = 0; i < 6; i++) pts[i] = new PointF(u[2 * i] * size, u[2 * i + 1] * size);
+      g.FillPolygon(b, pts);
+    }
+    return bmp;
+  }
+
   public static Bitmap PercentIcon(int size, State st, Theme th) {
+    if (st.Charging) return BoltIcon(size, th);
     Bitmap bmp = new Bitmap(size, size);
     using (Graphics g = Graphics.FromImage(bmp))
     using (FontFamily fam = new FontFamily(DisplayFont))
@@ -365,24 +409,24 @@ sealed class Painter : IDisposable {
       g.DrawString(conn, fSmall, sub, new RectangleF(0, Px(17), W - pad, Px(20)), far);
 
       // big percentage + verdict
-      string pct = st.Level >= 0 ? "~" + st.Level + "%" : "--%";   // approximate: reported in coarse steps
+      string pct = st.Charging ? "Charging" : st.Level >= 0 ? "~" + st.Level + "%" : "--%";   // approximate: reported in coarse steps
       g.DrawString(pct, fBig, fg, pad - Px(3), Px(42));
       float pw = g.MeasureString(pct, fBig).Width;
-      string verdict = st.Level < 0 ? "" : st.Stale ? "Last known" : st.Level <= 20 ? "Low - charge soon" : st.Level <= 50 ? "OK" : "Good";
+      string verdict = st.Charging ? "" : st.Level < 0 ? "" : st.Stale ? "Last known" : st.Level <= 20 ? "Low - charge soon" : st.Level <= 50 ? "OK" : "Good";
       g.DrawString(verdict, fVerdict, sub, pad + pw - Px(4), Px(63));
 
       // bar
       float bx = pad, by = Px(104), bw = W - 2 * pad, bh = Px(4);
       using (GraphicsPath tp = Pill(bx, by, bw, bh)) g.FillPath(track, tp);
-      if (st.Level > 0) {
+      if (st.Level > 0 && !st.Charging) {
         float fw = Math.Max(bh, bw * st.Level / 100f);
         Color col = st.Level <= 20 ? th.Low : st.Stale ? th.Sub : th.Accent;
         using (GraphicsPath bp = Pill(bx, by, fw, bh)) using (SolidBrush b = new SolidBrush(col)) g.FillPath(b, bp);
       }
 
       // details
-      string l1 = st.Level >= 0 ? "Updated " + st.Last.ToString("HH:mm:ss") + Dot + Ago(st.Last) : "The mouse reports about once a minute";
-      string l2 = st.Stale ? "No battery update for " + (int)(DateTime.Now - st.Last).TotalMinutes + " min - mouse asleep or off?"
+      string l1 = st.Level >= 0 || st.Charging ? "Updated " + st.Last.ToString("HH:mm:ss") + Dot + Ago(st.Last) : "The mouse reports about once a minute";
+      string l2 = st.Charging ? "Cable connected - the % isn't reliable while charging" : st.Stale ? "No battery update for " + (int)(DateTime.Now - st.Last).TotalMinutes + " min - mouse asleep or off?"
                 : st.Drain > 0 ? "About " + Hours(st.Level / st.Drain) + " left" + Dot + "-" + st.Drain.ToString("0.0") + "%/h"
                 : st.Level >= 0 ? "Time left: estimating (needs 2 h since the last charge)" : "";
       g.DrawString(l1, fSmall, sub, pad, Px(122));
@@ -509,7 +553,7 @@ sealed class TrayContext : ApplicationContext {
     if (tray.Visible != present) { tray.Visible = present; if (!present && fly.Visible) fly.Hide(); }
     if (!present) return;
     State st = State.Now();
-    string key = st.Level + "|" + st.Stale + "|" + Theme.Light + "|" + Theme.Fg.ToArgb();
+    string key = st.Level + "|" + st.Stale + "|" + st.Charging + "|" + Theme.Light + "|" + Theme.Fg.ToArgb();
     if (key != shownKey) {
       using (Bitmap bmp = Painter.PercentIcon(SystemInformation.SmallIconSize.Width, st, Theme)) {
         IntPtr h = bmp.GetHicon();
@@ -521,7 +565,7 @@ sealed class TrayContext : ApplicationContext {
       }
       shownKey = key;
     }
-    string tip = st.Level < 0 ? "AJ139 V2 MC\n" + st.Status : "AJ139 V2 MC: " + st.Level + "%\nUpdated " + (int)(DateTime.Now - st.Last).TotalMinutes + " min ago";
+    string tip = st.Charging ? "AJ139 V2 MC: charging\nUpdated " + (int)(DateTime.Now - st.Last).TotalMinutes + " min ago" : st.Level < 0 ? "AJ139 V2 MC\n" + st.Status : "AJ139 V2 MC: " + st.Level + "%\nUpdated " + (int)(DateTime.Now - st.Last).TotalMinutes + " min ago";
     tray.Text = tip.Length > 63 ? tip.Substring(0, 63) : tip;   // NotifyIcon limit
     if (fly.Visible) fly.Invalidate();
   }
@@ -623,6 +667,24 @@ static class Program {
     double d = AjBattery.DrainPerHour(); ok &= d > 1.7 && d < 2.3;
     AjBattery.OnLevel(100, t0.AddMinutes(200));                                         // charged (+10): reset
     ok &= AjBattery.Level == 100 && AjBattery.DrainPerHour() == -1;
+    // charging flag: [11] of a battery frame (28 Nov: 0 -> 1 when the dead mouse was plugged in)
+    ok &= AjBattery.ParseCharging(B(0, 0xAA, 0xFA, 0xAE, 0x5A, 0x38, 1, 1, 1, 0xD0, 0x5A, 0x01), 12) == 1;
+    ok &= AjBattery.ParseCharging(B(0, 0xAA, 0xFA, 0xAE, 0x2F, 0x38, 1, 1, 1, 0xD0, 0x24, 0x00), 12) == 0;
+    ok &= AjBattery.ParseCharging(press, 12) == -1;
+    // near empty: the real 28 Nov raw series (2-8 for hours) must not stay at the first 8; max-of-12 stayed at 7 on a dead mouse
+    AjBattery.ResetForTest();
+    foreach (int r in new[] { 8, 7, 7, 5, 2, 5, 3, 6, 4, 3, 3, 3, 2 }) AjBattery.OnLevel(r, t0.AddMinutes(r));
+    ok &= AjBattery.Level <= 4;
+    // charging: readings are ignored for the shown level, and a real unplug starts fresh from the next reading
+    AjBattery.ResetForTest();
+    AjBattery.OnLevel(8, t0);
+    foreach (int r in new[] { 84, 89, 88, 90 }) AjBattery.OnLevel(r, t0.AddMinutes(r), true);
+    ok &= AjBattery.Charging && AjBattery.Level == 8 && AjBattery.Raw == 90;
+    AjBattery.OnLevel(100, t0.AddMinutes(200)); ok &= !AjBattery.Charging && AjBattery.Level == 100;
+    // a one-report cable touch (14:15:50 on 27 Nov) must not reset the history
+    AjBattery.ResetForTest();
+    AjBattery.OnLevel(36, t0); AjBattery.OnLevel(32, t0.AddMinutes(1), true); AjBattery.OnLevel(35, t0.AddMinutes(2));
+    ok &= !AjBattery.Charging && AjBattery.Level == 36;
     // real DPI reply captured from the AJAZZ app: 6 stages, stage 2 (1-based) active = index 1
     byte[] pkt = Array.ConvertAll("00 AA 0E A5 A1 2F 00 00 00 00 00 04 06 02 90 01 84 03 B0 04 40 06 60 09 80 0C 00 00 00 00".Split(' '), x => Convert.ToByte(x, 16));
     int[] st; int act;
@@ -641,7 +703,7 @@ static class Program {
 
   static void Preview(string dir, float scale) {
     Directory.CreateDirectory(dir);
-    int[] levels = { 100, 75, 50, 35, 15, -1 };
+    int[] levels = { 100, 75, 50, 35, 15, -1, -2 };
     foreach (bool light in new[] { false, true }) {
       Theme th = Theme.Make(light, light ? Color.FromArgb(0, 95, 184) : Color.FromArgb(76, 194, 255));
       string name = light ? "light" : "dark";
@@ -653,7 +715,7 @@ static class Program {
         int row = 0;
         foreach (int sz in new[] { 16, 24 }) {
           for (int col = 0; col < levels.Length; col++) {
-            State s = new State(); s.Level = levels[col];
+            State s = new State(); s.Level = levels[col]; s.Charging = levels[col] == -2;
             using (Bitmap img = Painter.PercentIcon(sz, s, th)) {
               sg.DrawImage(img, 24 + col * cell, 24 + row * cell, sz * z, sz * z);
               sg.DrawImage(img, 24 + col * cell + 24 * z - sz, 24 + row * cell + 24 * z - sz + 16, sz, sz);
@@ -664,9 +726,9 @@ static class Program {
         sheet.Save(Path.Combine(dir, "icons-" + name + ".png"));
       }
       using (Painter p = new Painter(scale)) {
-        foreach (string c in new[] { "normal", "low", "waiting" }) {
-          State s = new State();
-          s.Level = c == "normal" ? 72 : c == "low" ? 14 : -1;
+        foreach (string c in new[] { "normal", "low", "waiting", "charging" }) {
+          State s = new State(); s.Charging = c == "charging";
+          s.Level = c == "normal" ? 72 : c == "low" ? 14 : c == "charging" ? 8 : -1;
           s.Last = c == "waiting" ? DateTime.MinValue : DateTime.Now.AddSeconds(-34);
           s.Status = c == "waiting" ? "Waiting for the first report" : "OK";
           s.Drain = c == "normal" ? 2.3 : -1;
