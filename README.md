@@ -22,6 +22,7 @@ The vendor software has no tray mode and no battery percentage, and the USB prot
 - **Tray icon with the battery %.** The colour runs from green to yellow to red as the battery drains, with separate shades for light and dark taskbars.
 - **Details panel.** Click the icon for a Windows 11-style panel with the battery, last update, an estimate of time left, and the DPI stages with the active one highlighted.
 - **Live DPI.** The active stage updates when you press the DPI button on the mouse.
+- **Charging indicator.** A lightning bolt replaces the number while the cable is connected, and the panel says "Charging". After unplugging, the level starts fresh from the next reading.
 - **Stable readings.** The mouse reports battery in coarse steps with load dips; the app filters these so the number doesn't jump around (see [Battery display](#battery-display)).
 - **Read-only.** It only listens to the receiver and never writes to the mouse.
 - **Lightweight.** One ~26 KB exe, ~0% CPU and ~34 MB RAM when idle. The icon appears only while the receiver is plugged in.
@@ -53,7 +54,7 @@ The receiver (USB `VID 0xA8A5`, `PID 0x2255`) exposes a vendor-defined HID colle
 
 | Message | Meaning |
 |---|---|
-| `AA FA tt xx 38 … D0 pp` | Battery report, sent periodically (`tt` = `00`) and on events (`tt` = `AE`). Byte 10 (`pp`) = battery % |
+| `AA FA tt xx 38 … D0 pp cc` | Battery report, sent periodically (`tt` = `00`) and on events (`tt` = `AE`). Byte 10 (`pp`) = battery %, byte 11 (`cc`) = `01` while the charging cable is connected |
 | `AA FA AE xx 0A … ss` | DPI frame: sent when the DPI button is pressed, and also when the mouse wakes from idle. Byte 10 = current stage (1-based) |
 | `AA 0E A5 xx … n a [s1 s2 …]` | DPI settings, sent when the vendor app asks: byte 12 = stage count, byte 13 = active stage, then uint16 LE values |
 | `AA 03 …` | Firmware strings (`YJX.co.mouse…`, build dates) |
@@ -65,6 +66,7 @@ The byte meanings come from watching how values change:
 - **Battery:** byte 10 drops slowly with use, reads the same in both message types, and is exactly 100 after a full charge. Byte 4 looked like a percentage at first, but it always equals byte 10 + 11 and reached 111, so it is not a separate reading.
 - **DPI button:** the stage number cycles 5 → 6 → 1 → 2 as you press it.
 - **DPI settings:** the uint16 values read as 400 / 900 / 1200 / 1600 / 2400 / 3200, which match the vendor app.
+- **Charging:** byte 11 went from `00` to `01` the moment the dead mouse was plugged in, and the reports kept coming over the dongle. While it is `01` the % is not a state of charge: it jumped from 0 to 84 in 26 s and then sat at 88–90 for over 30 minutes.
 - **Wake-up placeholder:** after the mouse has been idle, it sends the DPI frame without any button press, followed by a battery frame whose byte 10 is always `0x50` (80), whatever the real level (120 of 120 in the logs, true level 100% down to 34%). The app drops an 80 that arrives within 2 s of a DPI frame. Otherwise the +10 charge rule would take it for a charge and show ~80% for the next 12 reports.
 
 ## Battery display
@@ -81,6 +83,8 @@ So the app:
 - shows the **highest of the last 12 reports** (by count, so pauses don't matter), which removes the load dips;
 - **only lets the value go down** between charges. It goes up straight away on a jump of +10, or when all 12 recent reports are above it (a top-up);
 - estimates time left from a **straight-line fit over all reports since the last charge**, shown only after 2 hours of data and rounded to hours or days;
+- below **15%** switches to the **median of the last 5 reports** instead of the maximum. Near empty the dips are real voltage sag: in a full discharge the raw value sat at 2–8 for about 15 hours while the max-of-12 rule kept showing 7%;
+- ignores readings while the **charging cable** is connected, and starts fresh from the first reading after a real charge;
 - shows the percentage as **approximate** (`~90%`).
 
 Replaying the logged day through this rule gives 100 → 97 → 93 → 90 (3 changes). The previous median-of-5 changed 37 times, 18 of them upward.
