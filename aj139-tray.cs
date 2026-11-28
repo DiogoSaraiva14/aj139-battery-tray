@@ -81,9 +81,10 @@ static class AjBattery {
         // while charging the reading is the charger-lifted voltage (0 -> 84 in 26 s, then flat 88-90 for 30 min), not a
         // state of charge: keep it out of the history and the shown level
         chgRun++; Charging = true;
+        if (raw >= 100 && !fullNotified) { fullNotified = fullPending = true; Log("charge reached 100"); }   // once per charge
       } else {
         // unplugged after a real charge (not a one-report cable touch): start a fresh discharge from this reading
-        if (Charging) { Charging = false; if (chgRun >= 3) { hist.Clear(); Level = -1; } chgRun = 0; }
+        if (Charging) { Charging = false; fullNotified = false; if (chgRun >= 3) { hist.Clear(); Level = -1; } chgRun = 0; }
         if (Level >= 0 && raw >= Level + ChargeJump) hist.Clear();   // charged: new discharge starts here
         hist.Add(new KeyValuePair<DateTime, int>(now, raw));
         if (hist.Count > MaxHist) hist.RemoveAt(0);
@@ -101,7 +102,11 @@ static class AjBattery {
     Log("battery raw " + raw + " shown " + Level + (charging ? " charging" : ""));
   }
 
-  public static void ResetForTest() { lock (lk) { hist.Clear(); Level = -1; Charging = false; chgRun = 0; } }
+  // "charging reached 100" is reported once per charge; the tray polls TakeFull() to show the notification
+  static bool fullNotified, fullPending;
+  public static bool TakeFull() { lock (lk) { bool f = fullPending; fullPending = false; return f; } }
+
+  public static void ResetForTest() { lock (lk) { hist.Clear(); Level = -1; Charging = false; chgRun = 0; fullNotified = fullPending = false; } }
 
   // %/hour from a least-squares line over the readings since the last charge; -1 until 2 h of data
   // (the plateaus make anything shorter meaningless)
@@ -552,6 +557,7 @@ sealed class TrayContext : ApplicationContext {
     bool present = AjBattery.ReceiverPresent;   // show the icon only while the AJAZZ receiver is plugged in
     if (tray.Visible != present) { tray.Visible = present; if (!present && fly.Visible) fly.Hide(); }
     if (!present) return;
+    if (AjBattery.TakeFull()) tray.ShowBalloonTip(10000, "AJ139 V2 MC", "Fully charged - you can unplug the mouse.", ToolTipIcon.Info);
     State st = State.Now();
     string key = st.Level + "|" + st.Stale + "|" + st.Charging + "|" + Theme.Light + "|" + Theme.Fg.ToArgb();
     if (key != shownKey) {
@@ -681,6 +687,15 @@ static class Program {
     foreach (int r in new[] { 84, 89, 88, 90 }) AjBattery.OnLevel(r, t0.AddMinutes(r), true);
     ok &= AjBattery.Charging && AjBattery.Level == 8 && AjBattery.Raw == 90;
     AjBattery.OnLevel(100, t0.AddMinutes(200)); ok &= !AjBattery.Charging && AjBattery.Level == 100;
+    // full-charge notification: fires once when a charging report reads 100, again only after an unplug and a new charge
+    AjBattery.ResetForTest();
+    AjBattery.OnLevel(8, t0);
+    foreach (int r in new[] { 84, 90, 99 }) AjBattery.OnLevel(r, t0.AddMinutes(r), true);
+    ok &= !AjBattery.TakeFull();
+    AjBattery.OnLevel(100, t0.AddMinutes(100), true); AjBattery.OnLevel(100, t0.AddMinutes(101), true);
+    ok &= AjBattery.TakeFull() && !AjBattery.TakeFull();
+    AjBattery.OnLevel(95, t0.AddMinutes(200)); AjBattery.OnLevel(100, t0.AddMinutes(300), true);
+    ok &= AjBattery.TakeFull();
     // a one-report cable touch (14:15:50 on 27 Nov) must not reset the history
     AjBattery.ResetForTest();
     AjBattery.OnLevel(36, t0); AjBattery.OnLevel(32, t0.AddMinutes(1), true); AjBattery.OnLevel(35, t0.AddMinutes(2));

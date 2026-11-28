@@ -22,7 +22,7 @@ The vendor software has no tray mode and no battery percentage, and the USB prot
 - **Tray icon with the battery %.** The colour runs from green to yellow to red as the battery drains, with separate shades for light and dark taskbars.
 - **Details panel.** Click the icon for a Windows 11-style panel with the battery, last update, an estimate of time left, and the DPI stages with the active one highlighted.
 - **Live DPI.** The active stage updates when you press the DPI button on the mouse.
-- **Charging indicator.** A lightning bolt replaces the number while the cable is connected, and the panel says "Charging". After unplugging, the level starts fresh from the next reading.
+- **Charging indicator.** A lightning bolt replaces the number while the cable is connected, and the panel says "Charging". A notification ("Fully charged") appears once when a charging report reads 100. After unplugging, the level starts fresh from the next reading.
 - **Stable readings.** The mouse reports battery in coarse steps with load dips; the app filters these so the number doesn't jump around (see [Battery display](#battery-display)).
 - **Read-only.** It only listens to the receiver and never writes to the mouse.
 - **Lightweight.** One ~26 KB exe, ~0% CPU and ~34 MB RAM when idle. The icon appears only while the receiver is plugged in.
@@ -113,6 +113,14 @@ Replaying the logged day through this rule gives 100 → 97 → 93 → 90 (3 cha
 ```
 powershell -ExecutionPolicy Bypass -File tools\hidprobe.ps1 -VendorId A8A5 -ProductId 2255 -ListenSec 60
 ```
+
+## Roadmap
+
+- [x] Full discharge test (100% to dead mouse) and the filter fixes it led to.
+- [x] Charging detection (byte 11) and low-battery filter.
+- [ ] **Full-charge signal:** confirm what the mouse reports at the end of a charge on the cable (does it ever read 100, or does the flag change?). The "Fully charged" notification assumes a report of 100.
+- [ ] **New full drain log** with the current build, to check the low-battery median rule and the time-left estimate against a complete discharge.
+- [ ] **Bluetooth:** test what the mouse sends over Bluetooth. Only the 2.4G receiver has been tested, so Bluetooth battery and DPI reporting are unknown.
 
 ## Contributing
 
